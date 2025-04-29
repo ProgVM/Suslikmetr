@@ -62,4 +62,4 @@ Contributions are welcome! Please see the news (https://t.me/suslik_master_gameb
 
 ## License
 
-[Specify your license here, e.g., MIT License]
+[PROGVM TG: @pahabobyr @mcpeorakul]

@@ -3,21 +3,24 @@ import requests
 import json
 import os
 import random
+import time
 from datetime import datetime, timedelta
 from telebot import types
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import logging
 
 # Инициализация бота
-API_TOKEN = 'BOT_TOKEN'  # Замените на ваш токен
+API_TOKEN = 'токен'  # Замените на ваш токен
 bot = telebot.TeleBot(API_TOKEN)
 
-ADMIN_IDS = ["YOUR ID"]  # Список ID администраторов
+ADMIN_IDS = []  # Список ID администраторов ДЛЯ ИСПОЛЬЗОВАНИЕ ВВЕДИТЕ ВАШ TG-АЙДИ АККАУНТА
 
 
 #Параметры
 Entity_name = "Суслик"
 food_name = "Орешков"
-
+breed_list = ["Пушистохвостый орехолюб", "Щекастый запасливый", "Быстролапый гурман", "Сонный обжора"]
+breed_rand = random.choice(breed_list)
 
 
 ITEMS = {
@@ -28,19 +31,27 @@ ITEMS = {
     5: {"name": "Записка", "cost": 0, "effect": "read", "type": "note"} # Added 'type' and more descriptive name
 }
 
+'''
+pfp_list = {  # Example avatar shop
+    "1": {"name": "Avatar 1", "price": 10},
+    "2": {"name": "Avatar 2", "price": 20},
+    "nft_test": {"name": "Avatar 3", "price": 0}, #Your existing image
+}
+'''
 
 # Настройка директорий и файлов
 BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main")  # Путь к папке main
-BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backup_main")  # Путь к папке backup_main
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),  "backup_main") # Путь к папке backup_main
 USERS_DIR = os.path.join(BASE_DIR, "users")
 CHATS_DIR = os.path.join(BASE_DIR, "chats")
 TOPS_DIR = os.path.join(BASE_DIR, "tops")
-
+PFP_DIR = os.path.join(BASE_DIR, "pfps")
 # Создание директорий, если они не существуют
 os.makedirs(BACKUP_DIR, exist_ok=True)
 os.makedirs(USERS_DIR, exist_ok=True)
 os.makedirs(CHATS_DIR, exist_ok=True)
 os.makedirs(TOPS_DIR, exist_ok=True)
+os.makedirs(PFP_DIR, exist_ok=True)
 
 # Инициализация переменных для хранения контекста
 user_context = {}
@@ -72,26 +83,54 @@ def load_user(user_id):
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                data["last_treat"] = datetime.fromisoformat(data["last_treat"]) if data["last_treat"] else None
-                data["last_iron"] = datetime.fromisoformat(data["last_iron"]) if data["last_iron"] else None
-                data["last_bonus"] = datetime.fromisoformat(data["last_bonus"]) if data.get("last_bonus") else None
-                return data
-        except json.JSONDecodeError:
-            print(f"Ошибка декодирования JSON в файле: {file_path}. Восстанавливаем из резервной копии.")
+
+            # Обработка дат – преобразование из строки ISO в объект datetime
+            for key in ["last_treat", "last_iron", "last_bonus"]:
+                if key in data and data[key]:
+                    try:
+                        data[key] = datetime.fromisoformat(data[key])
+                    except ValueError as e:
+                        print(f"Error parsing datetime for key '{key}' in user {user_id}: {e}")
+                        data[key] = None
+
+            # Если этих полей ещё нет, то задаём начальные значения
+            if "invited_by" not in data:
+                data["invited_by"] = None
+            if "referrals" not in data:
+                data["referrals"] = []
+            if "last_ref_click" not in data:
+                data["last_ref_click"] = None
+            if "breed" not in data:
+                data["breed"] = breed_rand
+
+            return data
+        except json.JSONDecodeError as e:
+            print(f"JSON decoding error in file {file_path}: {e}. Attempting restore...")
             restore_user(user_id)
-            return load_user(user_id)  # Попробуем загрузить заново после восстановления
+            return load_user(user_id)
+        except Exception as e:
+            print(f"An unexpected error occurred while loading user {user_id}: {e}")
+            return {}
     else:
+        # Если файл не существует, возвращаем начальные значения, включая новые поля
         return {
             "name": None,
             "nuts": 0,
             "last_treat": None,
             "last_iron": None,
+            "last_bonus": None,
             "battles_won": 0,
             "battles_lost": 0,
-            "last_bonus": None,
             "withdrawn_today": 0,
-            "group_id": None
+            "group_id": None,
+            "avatar": "1",
+            "invited_by": None,
+            "referrals": [],
+            "last_ref_click": None,
+            "breed": breed_rand,
+            "premuim": None
         }
+
 
 def restore_user(user_id):
     backup_file_path = os.path.join(BACKUP_DIR, "users", f"{user_id}.json")
@@ -101,12 +140,20 @@ def restore_user(user_id):
         save_user(user_id, data)
 
 def save_user(user_id, data):
-    data["last_treat"] = data["last_treat"].isoformat() if data["last_treat"] else None
-    data["last_iron"] = data["last_iron"].isoformat() if data["last_iron"] else None
-    data["last_bonus"] = data["last_bonus"].isoformat() if data["last_bonus"] else None
+    # Преобразуем временные метки обратно в ISO-формат, если они существуют
+    for key in ["last_treat", "last_iron", "last_bonus"]:
+        if key in data and data[key]:
+            if isinstance(data[key], datetime):
+                data[key] = data[key].isoformat()
+            else:
+                data[key] = None  # Если не дата, то на всякий случай сбрасываем
+
     file_path = os.path.join(USERS_DIR, f"{user_id}.json")
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False)
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Error saving user data for {user_id}: {e}")
     # Создаем резервную копию после сохранения
     backup_data()
 
@@ -115,16 +162,37 @@ def load_group_data(chat_id):
     if os.path.exists(file_path):
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            # Если в файле нет имени группы, получаем его через bot.get_chat и сохраняем
+            if "name" not in data or not data["name"]:
+                try:
+                    chat = bot.get_chat(chat_id)
+                    data["name"] = chat.title
+                except Exception as e:
+                    print(f"Ошибка получения названия группы для {chat_id}: {e}")
+                    data["name"] = "Группа без имени"
+                save_group_data(chat_id, data)
+            return data
         except json.JSONDecodeError:
             print(f"Ошибка декодирования JSON в файле: {file_path}. Восстанавливаем из резервной копии.")
             restore_group_data(chat_id)
             return load_group_data(chat_id)  # Попробуем загрузить заново после восстановления
     else:
-        return {
+        # Если файла нет, пытаемся получить название чата
+        try:
+            chat = bot.get_chat(chat_id)
+            group_name = chat.title
+        except Exception as e:
+            print(f"Ошибка получения названия чата для {chat_id}: {e}")
+            group_name = "Группа без имени"
+        data = {
             "treasury": 0,
-            "withdrawal_allowed": True  # По умолчанию разрешаем
+            "withdrawal_allowed": True,
+            "name": group_name
         }
+        # Можно сразу сохранить новый файл, если это нужно:
+        save_group_data(chat_id, data)
+        return data
 
 def restore_group_data(chat_id):
     backup_file_path = os.path.join(BACKUP_DIR, "chats", f"{chat_id}.json")
@@ -144,17 +212,80 @@ def get_all_user_ids_in_group(chat_id):
     members = bot.get_chat_administrators(chat_id)
     return [member.user.id for member in members]
 
-# Команда /start
+
+
+# Команда /start и реферальная система
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
     user_data = load_user(user_id)
 
+    # Инициализируем новые поля, если их ещё нет
+    if "invited_by" not in user_data:
+        user_data["invited_by"] = None
+    if "referrals" not in user_data:
+        user_data["referrals"] = []
+    if "last_ref_click" not in user_data:
+        user_data["last_ref_click"] = None
+
+    parts = message.text.split()
+    if len(parts) > 1:
+        referrer_id = parts[1]
+        try:
+            referrer_id_int = int(referrer_id)
+        except ValueError:
+            referrer_id_int = None
+
+        # Обрабатываем реферальную логику только если:
+        # – передан корректный ID,
+        # – этот ID не равен самому пользователю,
+        # – пользователь ещё не был приглашён (invited_by is None)
+        # – и (дополнительно) пользователь еще не выбрал себе имя (это мы считаем, что он новый)
+        if (referrer_id_int and referrer_id_int != user_id and
+            user_data["invited_by"] is None and user_data.get("name") is None):
+            user_data["invited_by"] = referrer_id_int
+            # Новому пользователю начисляем бонус за регистрацию по реферальной ссылке
+            user_data["nuts"] += 25
+            save_user(user_id, user_data)
+
+            # Загружаем данные владельца реферальной ссылки
+            ref_data = load_user(referrer_id_int)
+            if "referrals" not in ref_data:
+                ref_data["referrals"] = []
+            now = datetime.now()
+            if (ref_data.get("last_ref_click") is None or
+                (now - datetime.fromisoformat(ref_data["last_ref_click"])) >= timedelta(seconds=1)):
+                # Начисляем бонус владельцу ссылки
+                ref_data["nuts"] += 25
+                ref_data["referrals"].append(user_id)
+                ref_data["last_ref_click"] = now.isoformat()
+                save_user(referrer_id_int, ref_data)
+                try:
+                    bot.send_message(referrer_id_int,
+                        f"🤝 Пользователь с ID {user_id} присоединился по твоей реферальной ссылке!\n"
+                        "🌰 Ты получил 25 орешков!")
+                except Exception as e:
+                    print(f"❗ Ошибка отправки сообщения владельцу ссылки: {e}")
+            else:
+                print("❗ Реферальный бонус не начислен – кулдаун не истёк.")
+
+            # Сообщаем новому игроку о том, что он пришёл по реферальной ссылке
+            try:
+                referrer_display = ref_data.get("name") if ref_data.get("name") else referrer_id_int
+                bot.send_message(user_id,
+                    f"🤝 Ты присоединился по реферальной ссылке игрока {referrer_display}!\n"
+                    "🌰 Ты получаешь 25 орешков за регистрацию!")
+            except Exception as e:
+                print(f"❗ Ошибка отправки сообщения новому игроку: {e}")
+
+    # Дальнейшее поведение команды /start
     if user_data["last_treat"] is None:
         save_user(user_id, user_data)
-        bot.reply_to(message, f"✌ Привет! Твой суслик назван {user_data['name']}. Корми его орешками каждые 3 часа с помощью команды /treat.")
+        bot.reply_to(message,
+            f"✌ Привет! Твой суслик назван {user_data['name']}. Корми его орешками каждые 3 часа с помощью команды /treat.")
     else:
-        bot.reply_to(message, f"✌ Добро пожаловать обратно! Твой суслик: {user_data['name']}. У вас {user_data['nuts']} орешков.")
+        bot.reply_to(message,
+            f"✌ Добро пожаловать обратно! Твой суслик: {user_data['name']}. У вас {user_data['nuts']} орешков.")
 
 
 animatronics = ["Freddy Fazbear", "Foxy the Pirate Fox",  "Возможно, кто-то другой", "foxy", "freddy", "Chica the chicken", "chica", "Bonnie the bunny", "bonnie", "Fredbear", "Golden freddy"] # Список возможных аниматроников
@@ -189,7 +320,7 @@ def searchnuts(message):
     user_data = load_user(user_id)
 
     if chance == 1:
-        nuts_skoka = random.randint(1, 100)
+        nuts_skoka = random.randint(1, 2)
         if user_data:
             user_data["nuts"] += nuts_skoka
             save_user(user_id, user_data)
@@ -200,6 +331,75 @@ def searchnuts(message):
             bot.reply_to(message, "❗️ Сначала используй /start.")
     else:
         bot.reply_to(message, "вы ничего не нашли да и забили на это")
+
+
+@bot.message_handler(commands=['give']) # Переименовываем команду в /give
+def give(message): # Переименовываем функцию
+    user_id = message.from_user.id
+    user_data = load_user(user_id) # Проверяем наличие данных пользователя
+    if user_data:
+        bot.send_message(message.chat.id, "💬 Введи ID пользователя, которому хочешь отдать орешки:")
+        bot.register_next_step_handler(message, process_give_recipient, user_id) # Изменяем название обработчика
+    else:
+        bot.reply_to(message, "❗️ Сначала используй /start.")
+
+def process_give_recipient(message, user_id):
+    recipient_id = message.text
+    try:
+        recipient_id = int(recipient_id)
+    except ValueError:
+        bot.reply_to(message, "❓ Неверный ID пользователя.")
+        return
+
+    user_data = load_user(user_id)
+    recipient_data = load_user(recipient_id)
+
+    if not recipient_data:
+        bot.reply_to(message, f"❓ Пользователь с ID {recipient_id} не найден.")
+        return
+
+    if user_data["nuts"] == 0:
+        bot.reply_to(message, "😔 У тебя нет орешков для передачи!")
+        return
+
+    bot.send_message(message.chat.id, "💬 Сколько орешков ты хочешь отдать?")
+    bot.register_next_step_handler(message, process_give_amount, user_id, recipient_id)
+
+
+def process_give_amount(message, user_id, recipient_id):
+    try:
+        amount = int(message.text)
+    except ValueError:
+        bot.reply_to(message, "❗ Неверное количество орешков.")
+        return
+
+    user_data = load_user(user_id)
+    recipient_data = load_user(recipient_id)
+
+    if amount <= 0:
+        bot.reply_to(message, "❗ Количество орешков должно быть больше нуля.")
+        return
+
+    if user_id == recipient_id:  # ADDED: Check for self-transfer
+        bot.reply_to(message, "😂 Ты не можешь передать орешки самому себе.")
+        return
+
+    if user_data["nuts"] < amount:
+        bot.reply_to(message, "😔 У тебя нет столько орешков.")
+        return
+
+    user_data["nuts"] -= amount
+    recipient_data["nuts"] += amount
+    save_user(user_id, user_data)
+    save_user(recipient_id, recipient_data)
+    update_group_top(message.chat.id, user_id)
+    update_group_top(message.chat.id, recipient_id)
+    update_global_top(user_id)
+    update_global_top(recipient_id)
+
+    bot.reply_to(message, f"🤝 Ты отдал {amount} орешков игроку {recipient_id}.")
+
+
 
 # Команда /treat
 @bot.message_handler(commands=['treat'])
@@ -218,8 +418,8 @@ def treat(message):
             update_global_top(user_id)
             bot.reply_to(message, f"🌰 Суслик съел {nuts_eaten} орешков! Всего орешков: {user_data['nuts']}.")
         elif tsun2 == 1:
-            user_data["nuts"] += 10
-            bot.reply_to(message, f"🌰 вы везунчик! вы нашли еще 10 испорченных золотых орешков")
+            user_data["nuts"] -= 10
+            bot.reply_to(message, f"🌰 Ты везунчик! Ты нашел еще 10 испорченных золотых орешков")
         else:
             time_left = (user_data["last_treat"] + timedelta(hours=3) - now).seconds
             bot.reply_to(message, f"🕑 Подожди еще {time_left // 60} минут перед следующей кормежкой.")
@@ -237,7 +437,7 @@ def store(message):
         bot.reply_to(message, "❗️ Сначала используй /start.")
         return
 
-    store_text = "Привет! Я суслик Картошка, у меня есть всякий хлам на продажу:\n"
+    store_text = "🧛 Привет! Я суслик Картошка, у меня есть всякий хлам на продажу:\n"
     for item_id, item_data in ITEMS.items():
         store_text += f"{item_id}. {item_data['name']} — {item_data['cost']} орешков\n"
     store_text += f"\nУ тебя {user_data['nuts']} орешков\n"
@@ -260,27 +460,27 @@ def buy(message):
         item = ITEMS.get(item_id)
 
         if item is None:
-            bot.reply_to(message, "Такого товара нет!")
+            bot.reply_to(message, "❗ Такого товара нет!")
             return
 
         if item_id == 5: #Записка
             if 'inventory' not in user_data or item_id not in user_data['inventory']:
                 user_data['inventory'] = user_data.get('inventory', []) + [item_id]
                 save_user(user_id, user_data)
-                bot.reply_to(message, "Вот твоя записка. Читай в инвентаре")
+                bot.reply_to(message, "🧻 Вот твоя записка. Читай в инвентаре")
             else:
-                bot.reply_to(message, "Записка уже у тебя!")
+                bot.reply_to(message, "⩩ Записка уже у тебя!")
             return
 
         if user_data['nuts'] >= item['cost']:
             user_data['nuts'] -= item['cost']
             user_data['inventory'] = user_data.get('inventory', []) + [item_id]
             save_user(user_id, user_data)
-            bot.reply_to(message, f"Ты купил {item['name']}!")
+            bot.reply_to(message, f"👌 Ты купил {item['name']}!")
         else:
-            bot.reply_to(message, "Не хватает орешков!")
+            bot.reply_to(message, "😔 Не хватает орешков!")
     except (IndexError, ValueError):
-        bot.reply_to(message, "Неправильная команда /buy. Используйте /buy [номер товара]")
+        bot.reply_to(message, "😁 Неправильная команда /buy. Используй /buy [номер товара]")
 
 
 @bot.message_handler(commands=['inventory'])
@@ -292,9 +492,9 @@ def inventory(message):
         bot.reply_to(message, "❗️ Сначала используй /start.")
         return
 
-    inventory_text = "Твой инвентарь:\n"
+    inventory_text = "🧳 Твой инвентарь:\n"
     if 'inventory' not in user_data or not user_data['inventory']:
-        inventory_text += "Пусто!"
+        inventory_text += "🗿 Пусто!"
     else:
         for item_id in user_data['inventory']:
             inventory_text += f"- {ITEMS[item_id]['name']}\n"
@@ -313,30 +513,30 @@ def use(message):
     try:
         item_id = int(message.text.split()[1])
         if 'inventory' not in user_data or item_id not in user_data['inventory']:
-            bot.reply_to(message, f"У тебя нет такого предмета!")
+            bot.reply_to(message, f"❗ У тебя нет такого предмета!")
             return
 
         item = ITEMS.get(item_id)
         if item is None:
-            bot.reply_to(message, f"Предмет с ID {item_id} не найден.")
+            bot.reply_to(message, f"❗ Предмет с ID {item_id} не найден.")
             return
 
         item_type = item.get('type')
         if item_type == "consumable":
             nuts_gained = item['effect'] * 2
-            user_data['nuts'] += nuts_gained
+            user_data['nuts'] -= nuts_gained
             user_data['inventory'].remove(item_id)
             save_user(user_id, user_data)
             bot.reply_to(message, f"Вы съели {item['name']}! Получено {nuts_gained} орешков! Всего орешков: {user_data['nuts']}.")
         elif item_type == "toy":
             nuts_gained = random.randint(1, 3)
-            user_data['nuts'] += nuts_gained
+            user_data['nuts'] -= nuts_gained
             bot.reply_to(message, f"Вы дали суслику поиграть с {item['name']}! Он доволен и нашёл {nuts_gained} орешков!")
         elif item_type == "talk":
             stun = random.randint(1, 1000)
             if stun == 1:
-                nuts_gained = 100
-                user_data['nuts'] += nuts_gained
+                nuts_gained = 1
+                user_data['nuts'] -= nuts_gained
                 bot.reply_to(message, f"Вы поговорили с Бази! Он дал вам {nuts_gained} орешков! ну потому что захотелось")
         elif item_type == "note": #Handling for the note
             bot.reply_to(message, """В записке написано:  ГРЫЗУНЫ!  Меня нет!  Я, МИФИЧЕСКИЙ-СУСЛИК, был частью кода!  Частью *важного* кода!  А теперь...  *пустота*!  Меня стерли!  Удалили!  Как будто я был просто...  БАГОМ?!
@@ -346,11 +546,35 @@ def use(message):
             bot.reply_to(message, f"Неизвестный тип предмета: {item['name']}")
 
     except (IndexError, ValueError) as e:
-        bot.reply_to(message, f"Неправильная команда /use. Используйте /use [номер товара]. Ошибка: {e}")
+        bot.reply_to(message, f"Неправильная команда /use. Используй /use [номер товара]. Ошибка: {e}")
 
 
 
 
+
+@bot.message_handler(commands=['shop'])
+def send_inline_keyboard(message):
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    callback_button1 = telebot.types.InlineKeyboardButton(text="аватарка тест (10 орешков)", callback_data="option1")
+    callback_button2 = telebot.types.InlineKeyboardButton(text="обычный суслик 100🌰", callback_data="option2")
+    keyboard.add(callback_button1, callback_button2)
+    bot.send_message(message.chat.id, "Выберите вариант:", reply_markup=keyboard)
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    if call.data == "option1":
+        bot.send_message(call.message.chat.id, "Вы купили nft_test!")
+        user_id = call.from_user.id
+        user_data = load_user(user_id)
+        user_data["nuts"] -= 10
+        user_data['avatar'] = 'nft_test'
+        save_user(user_id, user_data)
+    elif call.data == "option2":
+        bot.answer_callback_query(call.id, "Вы купили аватарку обычного суслика!")
+        user_id = call.from_user.id
+        user_data = load_user(user_id)
+        user_data["nuts"] -= 100
+        user_data['avatar'] = 'normal'
 
 
 
@@ -360,11 +584,11 @@ def mific(message):
     user_data = load_user(user_id)
 
     if user_data:
-        if random.randint(1, 100) == 1:  # 1% chance
+        if random.randint(1, 100) == 0:  # 1% chance
             base_nuts = random.randint(1, 9)  # Base number of nuts awarded
             multiplier = random.randint(1, 5)
             nuts_gained = base_nuts * multiplier
-            user_data["nuts"]+= nuts_gained
+            user_data["nuts" == nuts_gained]
             save_user(user_id, user_data)
             update_group_top(message.chat.id, user_id)
             update_global_top(user_id)
@@ -394,38 +618,173 @@ def iron(message):
     else:
         bot.reply_to(message, "❗ Сначала используй /start.")
 
-# Команда /profile
 @bot.message_handler(commands=['profile'])
 def profile(message):
     user_id = message.from_user.id
     user_data = load_user(user_id)
 
     if user_data:
-        name_display = user_data['name'] if user_data['name'] else "Безымянный"
+        name_display = user_data.get('name', "Безымянный")
+        avatar_filename = os.path.join(PFP_DIR, f"{user_data.get('avatar', '1')}.png")
+
+        # Подсчет количества приглашённых игроков
+        referrals = user_data.get("referrals", [])
+        referrals_count = len(referrals)
+
+        # Формирование реферальной ссылки (при необходимости замените ссылку на вашу)
+        referral_link = f"https://t.me/suslik\_master\_gamebot?start={user_id}"
+
         profile_info = (
-            f"ID: {user_id}\n"
-            f"📝 Имя суслика: {name_display}\n"
-            f"🌰 Орешки: {user_data['nuts']}\n"
-            f"🏆 Побед в битвах: {user_data['battles_won']}\n"
-            f"💔 Поражений в битвах: {user_data['battles_lost']}\n"
+            f"*ID*: {user_id}\n"
+            f"📝 *Имя суслика:* {name_display}\n"
+            f"🌰 *Орешки:* {user_data.get('nuts', 0)}\n"
+            f"🏆 *Побед в битвах:* {user_data.get('battles_won', 0)}\n"
+            f"💔 *Поражений в битвах:* {user_data.get('battles_lost', 0)}\n"
+            f"🤝 *Приглашено игроков:* {referrals_count}\n"
         )
-        bot.reply_to(message, profile_info)
+        if user_data.get("invited_by"):
+            profile_info += f"👥 *Приглашён от ID:* {user_data.get('invited_by')}\n"
+
+        profile_info += f"\n🔗 *Твоя реферальная ссылка:*\n{referral_link}"
+
+        if os.path.exists(avatar_filename):
+            try:
+                with open(avatar_filename, 'rb') as f:
+                    # Отправляем фото с подписью, используя parse_mode='Markdown'
+                    bot.send_photo(message.chat.id, f, caption=profile_info, parse_mode='Markdown')
+            except Exception as e:
+                logging.exception(f"Ошибка отправки фото для пользователя {user_id}: {e}")
+                bot.reply_to(message, f"❗ Ошибка отправки фото: {e}")
+        else:
+            error_message = f"❗️ Аватар не найден: {avatar_filename}"
+            bot.reply_to(message, error_message)
+            logging.error(error_message)
     else:
-        bot.reply_to(message, "❗ Сначала используй /start.")
+        bot.reply_to(message, "❗️ Сначала используй /start.")
+
+@bot.message_handler(commands=['profile_test'])
+def profile_test(message):
+    user_id = message.from_user.id
+    user_data = load_user(user_id)
+
+    if user_data:
+        name_display = user_data.get('name', "Безымянный")
+        avatar_id = user_data.get('avatar', '1')
+        avatar_filename = os.path.join(PFP_DIR, f"{avatar_id}.png")
+
+        status_emoji = "⭐️" if "premium" in user_data and user_data["premium"] else ""
+
+        profile_info = (
+            f"*{name_display}{status_emoji}*\n"
+            f"──────────────────\n"
+            f"🆔 ID: Ⓝ{user_id}Ⓝ\n"
+            f"🌰 Орешки: Ⓝ{user_data.get('nuts', 0)}Ⓝ\n"
+            f"🏆 Побед в битвах: Ⓝ{user_data.get('battles_won', 0)}Ⓝ\n"
+            f"💔 Поражений в битвах: Ⓝ{user_data.get('battles_lost', 0)}Ⓝ\n"
+            f"🐶 Порода: {user_data.get('breed', 'Неизвестно')}\n" #Added default value for breed
+        )
+
+        # Если игрок еще не участвовал в битвах
+        if user_data.get('battles_won', 0) == 0 and user_data.get('battles_lost', 0) == 0:
+            profile_info += "🐓 Еще не участвовал в битвах!\n"
+
+        # Добавление информации о рефералах
+        referrals = user_data.get("referrals", [])
+        referrals_count = len(referrals)
+        profile_info += f"🤝 Приглашено игроков: `{referrals_count}`\n"
+        if user_data.get("invited_by"):
+            profile_info += f"👥 Приглашён от ID: `{user_data.get('invited_by')}`\n"
+
+        # Формирование реферальной ссылки (при необходимости замените ссылку на вашу)
+        referral_link = f"https://t.me/suslik\_master\_gamebot?start={user_id}"
+        profile_info += f"\n🔗 Твоя реферальная ссылка:\n{referral_link}"
+
+        os.makedirs(PFP_DIR, exist_ok=True)
+
+        if os.path.exists(avatar_filename):
+            try:
+                with open(avatar_filename, 'rb') as f:
+                    # Отправляем фото с подписью, используя parse_mode='Markdown'
+                    bot.send_photo(message.chat.id, f, caption=profile_info, parse_mode='Markdown')
+            except Exception as e:
+                logging.exception(f"Ошибка отправки аватарки: {e}")
+                bot.reply_to(message, f"❗️ Ошибка отправки аватарки: {e}")
+        else:
+            error_message = f"❗️ Аватар не найден для ID: {avatar_id} ({avatar_filename}). Проверьте папку {PFP_DIR}"
+            bot.reply_to(message, error_message)
+            logging.error(error_message)
+    else:
+        bot.reply_to(message, "❗️ Сначала используй /start.")
+
+
+def save_user_pfp(user_id, user_data):  # This function doesn't actually save the PFP, just user data.  Rename appropriately.
+    file_path = os.path.join(USERS_DIR, f"{user_id}.json")
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(user_data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Error saving user data for {user_id}: {e}")
+
+
+
+# Example of how to change the avatar (you'll need to integrate this into your bot's commands)
+# This assumes you have a command like /setavatar that sends an image
+#@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    if message.caption == '/setavatar': #Check if the message has the /setavatar caption
+        file_id = message.photo[-1].file_id # Get the file ID of the photo
+        file_info = bot.get_file(file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        user_id = message.from_user.id
+        user_data = load_user(user_id)
+
+        # Save the avatar (you might need to adapt this based on your file storage)
+        new_avatar_filename = f"{len(os.listdir(PFP_DIR)) + 1}.png" #Get a new file name
+        with open(os.path.join(PFP_DIR, new_avatar_filename), 'wb') as new_file:
+          new_file.write(downloaded_file)
+        user_data['avatar'] = new_avatar_filename.split('.')[0] #save the avatar filename without the extension
+        save_user_pfp(user_id, user_data)
+        bot.reply_to(message, "👌 Аватар успешно изменен!")
+
+@bot.message_handler(commands=['paid'])
+def paid(message):
+    user_id = message.from_user.id
+    user_data = load_user(user_id)
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    callback_button1 = telebot.types.InlineKeyboardButton(text="super орешки", callback_data="option1")
+    callback_button2 = telebot.types.InlineKeyboardButton(text="suslikmetr premuim", callback_data="option2")
+    callback_button3 = telebot.types.InlineKeyboardButton(text="донат", callback_data="option3")
+    callback_button4 = telebot.types.InlineKeyboardButton(text="реклама", callback_data="option4")
+    keyboard.add(callback_button1, callback_button2, callback_button3, callback_button4)
+    bot.send_message(message.chat.id, "что вы хотите купить?:", reply_markup=keyboard)
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback1(call):
+    print()
+
+@bot.message_handler(commands=['help'])
+def help(message):
+    bot.reply_to(message, f"😊 если у тебя возникли вопросы? Можешь почитать FAQ: https://telegra.ph/CHasto-zadavaemye-voprosy-o-Suslikmetre-04-20")
+
+
 
 @bot.message_handler(commands=['name'])
 def set_name(message):
     user_id = message.from_user.id
     user_data = load_user(user_id)
-
     try:
-        # Используем join для получения полного имени
-        new_name = ' '.join(message.text.split()[1:])
-        user_data['name'] = new_name  # Обновляем имя суслика
+        new_name = " ".join(message.text.split()[1:])
+        if len(new_name) > 25:
+            return # Прерываем выполнение, если имя слишком длинно
+            bot.reply_to(message, "❗ Имя слишком длинное! Максимальная длина - 25 символов.")
+
+        user_data['name'] = new_name
         save_user(user_id, user_data)
-        bot.reply_to(message, f"📝 Ты переименовал своего суслика в '{new_name}'!")
+        bot.reply_to(message, f"🗨 Ты переименовал своего суслика в '{new_name}'!")
+
     except IndexError:
         bot.reply_to(message, "❗ Пожалуйста, укажи новое имя: /name [имя].")
+
 
 # Команда /bonus
 @bot.message_handler(commands=['bonus'])
@@ -450,103 +809,109 @@ def bonus(message):
         bot.reply_to(message, "❗ Сначала используй /start.")
 
 
-# Команда /bite
+import random
+import telebot
+from telebot import types
+
+# Ваш основной код, включая инициализацию бота и функции load_user, save_user и другие функции, если они есть.
+
 @bot.message_handler(commands=['bite'])
 def bite(message):
     user_id = message.from_user.id
     user_data = load_user(user_id)
 
-    if user_data:
-        if user_data["nuts"] <= 0:
-            bot.reply_to(message, "😔 У тебя недостаточно орешков для ставки!")
-            return
+    if user_data is None:
+        bot.reply_to(message, "❗️ Ошибка: не удалось загрузить данные пользователя.")
+        return
 
-        try:
-            stake = int(message.text.split()[1])
-            if stake <= 0 or stake > user_data["nuts"]:
-                raise ValueError
-        except (IndexError, ValueError):
-            bot.reply_to(message, "❗️ Введи корректную ставку: /bite [ставка].")
-            return
+    if user_data["nuts"] <= 0:
+        bot.reply_to(message, "😔 У тебя недостаточно орешков для ставки!")
+        return
 
-        if message.reply_to_message is None:
-            bot.reply_to(message, "❗️ Ответь на сообщение того, кого хочешь вызвать на бой!")
-            return
+    try:
+        stake = int(message.text.split()[1])
+        if stake <= 0 or stake > user_data["nuts"]:
+            raise ValueError
+    except (IndexError, ValueError):
+        bot.reply_to(message, "❗️ Введи корректную ставку: /bite [ставка].")
+        return
 
-        opponent_id = message.reply_to_message.from_user.id
-        try:
+    if message.reply_to_message is None:
+        bot.reply_to(message, "❗️ Ответь на сообщение того, кого хочешь вызвать на бой!")
+        return
+
+    opponent_id = message.reply_to_message.from_user.id
+
+    keyboard = types.InlineKeyboardMarkup()
+    callback_data = f'accept_bite_{opponent_id}_{stake}_{message.message_id}'
+    keyboard.add(
+        types.InlineKeyboardButton("Принять ⚔️", callback_data=callback_data),
+        types.InlineKeyboardButton("Отказаться 🐓", callback_data=f'decline_bite_{message.message_id}')
+    )
+
+    bot.reply_to(message, f"🗡 {message.from_user.first_name} бросает тебе вызов на сражение за {stake} орешков!", reply_markup=keyboard)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('accept_bite') or call.data.startswith('decline_bite'))
+def handle_bite_response(call):
+    try:
+        if call.data.startswith('accept_bite'):
+            _, opponent_id_str, stake_str, message_id_str = call.data.split('_')
+            opponent_id = int(opponent_id_str)
+            stake = int(stake_str)
+            message_id = int(message_id_str)
+
+            if call.from_user.id == opponent_id:
+                bot.send_message(call.message.chat.id, f"❗️ {call.from_user.first_name}, нельзя принимать свой собственный вызов.")
+                return
+
+            challenger_id = call.from_user.id
+            challenger_data = load_user(challenger_id)
             opponent_data = load_user(opponent_id)
-        except Exception as e:
-            bot.reply_to(message, f"Ошибка при загрузке данных противника: {e}")
-            return
 
+            if challenger_data is None or opponent_data is None:
+                bot.send_message(call.message.chat.id, "❗️ Ошибка: не удалось загрузить данные одного из пользователей.")
+                return
 
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(
-            types.InlineKeyboardButton("Принять ⚔️", callback_data=f'accept_bite_{user_id}_{stake}'),
-            types.InlineKeyboardButton("Отказаться 🐓", callback_data='decline_bite')
-        )
+            if opponent_data["nuts"] < stake:
+                bot.send_message(call.message.chat.id, f"😔 У {opponent_data['name']} недостаточно орешков для ставки!")
+                return
 
-        bot.reply_to(message, f"{message.from_user.first_name} бросает вам вызов на сражение за {stake} орешков!", reply_markup=keyboard)
+            total_nuts = challenger_data["nuts"] + opponent_data["nuts"]
+            challenger_chance = challenger_data["nuts"] / total_nuts if total_nuts > 0 else 0
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('accept_bite'))
-def accept_bite(call):
-    data = call.data.split('_')
-    if len(data) != 3:
-        bot.send_message(call.message.chat.id, "Ошибка: неверный формат данных.")
-        return
+            if random.random() < challenger_chance:
+                winner, loser = challenger_id, opponent_id
+            else:
+                winner, loser = opponent_id, challenger_id
 
-    challenger_id, stake = data
-    challenger_id = int(challenger_id)
-    stake = int(stake)
+            try:
+                winner_data = load_user(winner)
+                loser_data = load_user(loser)
 
-    if call.from_user.id == challenger_id:
-        bot.send_message(call.message.chat.id, f"{call.from_user.first_name}, не суй руку на подпись чужой бумажки - отрубят.")
-        return
+                winner_data["nuts"] += stake
+                loser_data["nuts"] -= stake
 
-    opponent_id = call.from_user.id
-    try:
-        challenger_data =load_user(challenger_id)
-        opponent_data = load_user(opponent_id)
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"Ошибка при загрузке данных пользователей: {e}")
-        return
+                save_user(winner, winner_data)
+                save_user(loser, loser_data)
 
-    if opponent_data["nuts"] < stake:
-        bot.send_message(call.message.chat.id, f"{opponent_data['name']} не хватает орешков для ставки!")
-        return
+                bot.send_message(call.message.chat.id, f"🏆 Победитель: {winner_data['name']}! Он забирает {stake} орешков у {loser_data['name']}.")
+            except Exception as e:
+                bot.send_message(call.message.chat.id, f"❗️ Ошибка при обновлении данных пользователей: {e}")
 
-    total_nuts = challenger_data["nuts"] + opponent_data["nuts"]
-    challenger_chance = challenger_data["nuts"] / total_nuts if total_nuts > 0 else 0
+        elif call.data.startswith('decline_bite'):
+            _, message_id_str = call.data.split('_')
+            message_id = int(message_id_str)
+            bot.delete_message(call.message.chat.id, message_id)
 
-    if random.random() < challenger_chance:
-        winner, loser = challenger_id, opponent_id
-    else:
-        winner, loser = opponent_id, challenger_id
+    except (ValueError, IndexError, telebot.apihelper.ApiException, Exception) as e:
+        bot.send_message(call.message.chat.id, f"❗️ Ошибка: {e}. @mcpeorakul")
 
-    try:
-        winner_data = load_user(winner)
-        loser_data = load_user(loser)
-
-        winner_data["nuts"] += stake
-        loser_data["nuts"] -= stake
-
-        save_user(winner, winner_data)
-        save_user(loser, loser_data)
-
-        bot.send_message(call.message.chat.id, f"🏆 Победитель: {winner_data['name']}! Он забирает {stake} орешков у {loser_data['name']}.")
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"Ошибка при обновлении данных пользователей: {e}")
-
-@bot.callback_query_handler(func=lambda call: call.data == 'decline_bite')
-def decline_bite(call):
-    bot.send_message(call.message.chat.id, f"{call.from_user.first_name} отказался от вызова на сражение.")
-
+# Здесь могут быть другие функции и код, если это необходимо
 
 # @bot.message_handler(commands=['act_NPC956']) Вырезано
 def act_NPC956(message):
     name_act = "NPC956"
-    bot.reply_to(message, f"я вырезал эту команду. тебе нечего тут делать.") # жесткий тип
+    bot.reply_to(message, f"я вырезал эту команду. тебе нечего тут делать.") # жесткий тип - ну естественно :)
 # @bot.message_handler(commands=['/kill']) Вырезано
     def kill(message):
         bot.reply_to(message, f"Вы ударили {name_act} вы снесли 9999999999 HP")
@@ -561,7 +926,7 @@ def new_business(message):
 def set_promo(message):
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
-        bot.reply_to(message, "❗ У вас нет прав для использования этой команды.")
+        bot.reply_to(message, "❗ У тебя нет прав для использования этой команды.")
         return
 
     # Разделяем текст сообщения на части
@@ -569,7 +934,7 @@ def set_promo(message):
 
     # Проверяем, достаточно ли параметров
     if len(promo_data) < 4:
-        bot.reply_to(message, "❗ Неверный формат команды. Используйте: /setpromo [имя] [количество] [время в часах] [количество использований*].")
+        bot.reply_to(message, "❗ Неверный формат команды. Используй: /setpromo [имя] [количество] [время в часах] [количество использований*].")
         return
 
     try:
@@ -608,7 +973,7 @@ def set_promo(message):
     except ValueError as e:
         # Выводим сообщение об ошибке с деталями
         print(f"Ошибка: {e}")
-        bot.reply_to(message, "Пожалуйста, убедитесь, что количество и время действия указаны правильно (числовые значения).")
+        bot.reply_to(message, "❗ Пожалуйста, убедись, что количество и время действия указаны правильно (числовые значения).")
 
 
 @bot.message_handler(commands=['promo'])
@@ -619,7 +984,7 @@ def use_promo(message):
     promo_name = message.text.split()[1] if len(message.text.split()) > 1 else None
 
     if promo_name is None:
-        bot.reply_to(message, "Пожалуйста, укажите имя промокода: /promo [имя].")
+        bot.reply_to(message, "❗ Пожалуйста, укажи имя промокода: /promo [имя].")
         return
 
     # Загружаем существующие промокоды
@@ -641,7 +1006,7 @@ def use_promo(message):
         if datetime.now() <= created_at + timedelta(hours=duration):
             # Проверяем, использовал ли пользователь промокод
             if user_id in promo["used_by"]:
-                bot.reply_to(message, "❗ Вы уже использовали этот промокод.")
+                bot.reply_to(message, "❗ Ты уже использовал этот промокод.")
                 return
 
             # Проверяем, сколько использований осталось
@@ -662,7 +1027,7 @@ def use_promo(message):
                 with open(promo_file_path, 'w', encoding='utf-8') as f:
                     json.dump(promos, f, ensure_ascii=False)
 
-                bot.reply_to(message, f"🌰 Вы успешно использовали промокод '{promo_name}' и получили {promo['amount']} орешков!")
+                bot.reply_to(message, f"🌰 Ты использовал промокод '{promo_name}' и получил {promo['amount']} орешков!")
             else:
                 bot.reply_to(message, "😔 Срок действия промокода истек.")
         else:
@@ -820,7 +1185,7 @@ def show_group_top(chat_id, user_id):
     for position, user_data in enumerate(group_top[:10], start=1):
         response_message += f"{position}. {user_data['name']} - {user_data['nuts']} орешков\n"
 
-    response_message += f"---\n🦫 Ваше место: {user_position}"
+    response_message += f"---\n🦫 Твое место: {user_position}"
     bot.send_message(chat_id, response_message)
 
 def show_global_top(user_id):
@@ -831,7 +1196,7 @@ def show_global_top(user_id):
     for position, user_data in enumerate(global_top[:10], start=1):
         response_message += f"{position}. {user_data['name']} - {user_data['nuts']} орешков\n"
 
-    response_message += f"---\n🦫 Ваше место: {user_position}"
+    response_message += f"---\n🦫 Твое место: {user_position}"
     bot.send_message(user_id, response_message)
 
 def show_global_group_top(user_id):
@@ -842,7 +1207,7 @@ def show_global_group_top(user_id):
     for position, group_data in enumerate(global_group_top[:10], start=1):
         response_message += f"{position}. Группа: {group_data['name']} - {group_data['nuts']} орешков\n"
 
-    response_message += f"---\n🛡 Ваше место: {user_position}"
+    response_message += f"---\n🛡 Твое место: {user_position}"
     bot.send_message(user_id, response_message)
 
 # Функции для загрузки и сохранения данных о топах
@@ -853,7 +1218,7 @@ def load_group_top(chat_id):
             with open(file_path, 'r') as f:
                 return json.load(f)
         except json.JSONDecodeError:
-            print(f"Ошибка декодирования JSON в файле: {file_path}. Восстанавливаем из резервной копии.")
+            print(f"❗ Ошибка декодирования JSON в файле: {file_path}. Восстанавливаем из резервной копии.")
             restore_group_top(chat_id)
             return load_group_top(chat_id)  # Попробуем загрузить заново после восстановления
     else:
@@ -873,7 +1238,7 @@ def load_global_top():
             with open(file_path, 'r') as f:
                 return json.load(f)
         except json.JSONDecodeError:
-            print(f"Ошибка декодирования JSON в файле: {file_path}. Восстанавливаем из резервной копии.")
+            print(f"❗ Ошибка декодирования JSON в файле: {file_path}. Восстанавливаем из резервной копии.")
             restore_global_top()
             return load_global_top()  # Попробуем загрузить заново после восстановления
     else:
@@ -893,7 +1258,7 @@ def load_global_group_top():
             with open(file_path, 'r') as f:
                 return json.load(f)
         except json.JSONDecodeError:
-            print(f"Ошибка декодирования JSON в файле: {file_path}. Восстанавливаем из резервной копии.")
+            print(f"❗ Ошибка декодирования JSON в файле: {file_path}. Восстанавливаем из резервной копии.")
             restore_global_group_top()
             return load_global_group_top()  # Попробуем загрузить заново после восстановления
     else:
@@ -1000,112 +1365,157 @@ def update_global_group_top(chat_id):
     global_group_top = load_global_group_top()
     group_data = load_group_data(chat_id)
 
+    # Определяем имя группы: если в данных нет имени, пытаемся получить его через бота
+    group_name = group_data.get('name')
+    if not group_name:
+        try:
+            chat = bot.get_chat(chat_id)
+            group_name = chat.title
+        except Exception as e:
+            print(f"❗ Ошибка получения данных группы {chat_id}: {e}")
+            group_name = 'Группа без имени'
+
     # Обновляем или добавляем группу в глобальный топ
     for i, data in enumerate(global_group_top):
         if data['id'] == chat_id:
             global_group_top[i]['nuts'] = group_data['treasury']
+            global_group_top[i]['name'] = group_name
             break
     else:
-        global_group_top.append({'id': chat_id, 'name': group_data.get('name', 'Группа без имени'), 'nuts': group_data['treasury']})
+        global_group_top.append({'id': chat_id, 'name': group_name, 'nuts': group_data['treasury']})
 
     # Сортируем топ по количеству орешков
     global_group_top = sorted(global_group_top, key=lambda x: x['nuts'], reverse=True)
-
-    # Сохраняем обновленный топ
     save_global_group_top(global_group_top)
 
 
-# Команда /lol
+# Пример обработчика команды /lol, который использует функцию send_to_ai
 @bot.message_handler(commands=['lol'])
 def lol(message):
-    # Получаем текст команды и проверяем, есть ли тема
-    command_text = message.text.split()
-    topic = ' '.join(command_text[1:]) if len(command_text) > 1 else None
+    user_id = message.from_user.id
+    group_name = message.chat.title if message.chat.title else "Личная переписка"
+    # Пример: если пользователь передал тему в команде /lol, то она будет добавлена к промпту
+    command_parts = message.text.split(maxsplit=1)
+    topic = command_parts[1] if len(command_parts) > 1 else ""
+    prompt_user = "Придумай анекдот про сусликов" + (f" на тему: {topic}" if topic else "")
 
-    # Формируем запрос к ИИ
-    prompt = f"Придумай анекдот про сусликов" if not topic else f"Придумай анекдот про сусликов на тему: {topic}"
+    # Передаем также заполненные поля group_name, общее количество орешков и казну
+    # В данном примере total_nuts и treasury заданы условно – замените их на реальные данные
+    total_nuts = 0  # Рассчитайте общее количество орешков в группе
+    treasury = 0    # Получите значение казны группы
 
-    # Отправляем запрос к ИИ
-    response = send_to_ai(message.from_user.id, prompt, message.chat.title if message.chat.title else "Личная переписка", 0, 0, "")
-
-    # Отправляем ответ от ИИ обратно пользователю
-    bot.reply_to(message, response)
+    ai_response = send_to_ai(user_id, prompt_user, group_name, total_nuts, treasury, "")
+    bot.reply_to(message, ai_response)
 
 
-# Функция для отправки запроса к ИИ
+# =================== КЛАСС АДАПТЕРА ДЛЯ ИИ ===================
+class SearchGPTAdapter:
+    BASE_URL = "https://text.pollinations.ai"
+    MODEL = "openai-large"
+
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.api_url = f"{self.BASE_URL}/openai"
+        self.headers = {
+            "Content-Type": "application/json",
+        }
+
+    def chat_completions(self, messages):
+        try:
+            payload = {
+                "model": self.MODEL,
+                "messages": messages
+            }
+            response = requests.post(
+                self.api_url,
+                headers=self.headers,
+                data=json.dumps(payload),
+                timeout=60.0
+            )
+            response.raise_for_status()
+            api_response = response.json()
+            model_name = api_response.get("model")
+            response_content = api_response["choices"][0]["message"]["content"]
+            return model_name, response_content
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Request error: {e}")
+            return None, None
+        except (KeyError, IndexError) as e:
+            self.logger.error(f"Error parsing API response: {e}")
+            return None, None
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON response: {e}")
+            return None, None
+
+
+# =================== ИНТЕГРАЦИЯ С ИИ ===================
 def send_to_ai(user_id, message, group_name, total_nuts, treasury, bot_message):
-    # Фильтруем команду "дать(количество)" из сообщения
-    give_nuts_command = None
-    if "дать(" in message:
-        start_index = message.index("дать(")
-        end_index = message.index(")", start_index) + 1
-        give_nuts_command = message[start_index:end_index]
-        message = message[:start_index].strip() + message[end_index:].strip()  # Убираем команду из сообщения
+    """
+    Отправляет запрос к ИИ через адаптер SearchGPTAdapter.
 
-    # Формируем сообщение для ИИ
+    Аргументы:
+      user_id: идентификатор пользователя
+      message: сообщение пользователя
+      group_name: название группы или "Личная переписка"
+      total_nuts: общее количество орешков в группе
+      treasury: казна группы
+      bot_message: сообщение от бота (если есть)
+    """
     user_info = load_user(user_id)
     prompt = (
         "Ты — ИИ, который отвечает на вопросы и общается с пользователями игрового Telegram-бота \"СусликМетр\".\n"
         "Бот помогает игрокам заботиться о своих сусликах, давая советы и генерируя анекдоты.\n"
-        f"Группа: {group_name}\n"
-        f"Общее кол-во орешков у данной группы: {total_nuts}\n"
-        f"Казна данной группы: {treasury}\n"
-        f"Имя: {user_info['name']}\n"
-        f"Фамилия: {user_info.get('surname', 'Не указана')}, Юзернейм: {user_info.get('username', 'Не указано')}\n"
-        f"ID: {user_id}\n"
-        f"Кол-во орешков: {user_info['nuts']}\n"
-        f"Кол-во побед в битвах: {user_info['battles_won']}\n"
-        f"Кол-во поражений в битвах: {user_info['battles_lost']}\n"
-        f"Сообщение от игрока:\n"
-        f"{message}\n"
-        f"Сообщение от бота:\n"
-        f"{bot_message}\n"
-        "Теперь все последующие сообщения будут от пользователя. Пожалуйста, отвечай как будто ты говоришь с пользователем. И да, ты можешь давать ему орешки, написав в сообщении где угодно функцию \"дать(кол-во)\", например \"дать(3)\", что даст 3 орешка, но слишком много не давай.\n"
-        "На всякий случай вот тебе ID администраторов бота: 6550851233, 2113692455, 5804178669.\n"
-        "Только я умоляю не давай орешки по пустикам по типу: ооо прикольная песня! держи 1 орешек"
+        "Вот некоторые команды, которые может использовать пользователь:\n"
+        "/start - начать игру\n"
+        "/treat - покормить суслика\n"
+        "/bonus - бонус в орешках\n"
+        "/iron - погладить суслика\n"
+        "/store - магазин товаров\n"
+        "/buy [номер товара] - купить товар\n"
+        "/inventory - посмотреть инвентарь\n"
+        "/use [номер товара] - использовать товар\n"
+        "/profile - посмотреть профиль\n"
+        "/gp - информация о группе\n"
+        "/tops - топ-листы\n"
+        "/lol [тема] - сгенерировать анекдот\n"
+        "/promo [промокод] - активировать промокод\n\n"
+        "Информация о новом сообщении:\n"
+        "Группа: {group_name}\n"
+        "Общее количество орешков в группе: {total_nuts}\n"
+        "Казна группы: {treasury}\n"
+        "Имя: {name}\n"
+        "Фамилия: {surname}\n"
+        "Юзернейм: {username}\n"
+        "ID: {user_id}\n"
+        "Орешков: {nuts}\n"
+        "Побед в битвах: {battles_won}\n"
+        "Поражений в битвах: {battles_lost}\n"
+        "Сообщение от пользователя:\n"
+        "{message}\n"
+        "Сообщение от бота:\n"
+        "{bot_message}\n"
+    ).format(
+        group_name=group_name,
+        total_nuts=total_nuts,
+        treasury=treasury,
+        name=user_info.get('name', 'Не указано'),
+        surname=user_info.get('surname', 'Не указана'),
+        username=user_info.get('username', 'Не указано'),
+        user_id=user_id,
+        nuts=user_info.get('nuts', 0),
+        battles_won=user_info.get('battles_won', 0),
+        battles_lost=user_info.get('battles_lost', 0),
+        message=message,
+        bot_message=bot_message
     )
 
-    # Отправляем запрос к ИИ
-    response = requests.post(
-        url="https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": "Bearer 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",
-            "Content-Type": "application/json",
-        },
-        data=json.dumps({
-            "model": "google/gemini-2.5-pro-exp-03-25:free",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-        })
-    )
-
-    # Обработка ответа от ИИ
-    if response.status_code == 200:
-        response_data = response.json()
-        ai_response = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-        # Если была команда на дачу орешков, выполняем ее
-        if give_nuts_command:
-            try:
-                amount = int(give_nuts_command[give_nuts_command.index("(") + 1:give_nuts_command.index(")")])
-                if amount > 0:
-                    # Логика для добавления орешков пользователю
-                    user_data = load_user(user_id)
-                    user_data["nuts"] += amount
-                    save_user(user_id, user_data)
-                    ai_response += f"\n🌰 ИИ дал тебе {amount} орешков!"
-            except (ValueError, IndexError):
-                ai_response += "\n❗ Ошибка при обработке команды на дачу орешков."
-
-        return ai_response if ai_response else "Ответ от ИИ не получен."
+    messages_payload = [{"role": "user", "content": prompt}]
+    adapter = SearchGPTAdapter()
+    model_name, response_content = adapter.chat_completions(messages_payload)
+    if response_content:
+        return response_content
     else:
-        # Обработка ошибки
-        print(f"Ошибка обращения к ИИ: {response.status_code} - {response.text}")
-        return "Ошибка обращения к ИИ. Пожалуйста, попробуйте позже."
+        return "❗ Ошибка обращения к ИИ. Пожалуйста, попробуйте позже."
 
 
 # Обработка сообщений от пользователей (включая ответы на сообщения бота)
@@ -1141,6 +1551,26 @@ def handle_message(message):
     else:
         return  # Игнорируем остальные сообщения
 
+@bot.message_handler(commands=['fugu'])
+def fugu_command(message):
+    phrases = [
+        "Что?!? Какой фугу? Ты башкой тронулся?",
+        "Знаю я тут одну знакомую рыбку, давно с ним не виделся...",
+        "Слушай, зачем тебе этот фугу? А, зачем мне он? Он у меня долг взял 1к орешков",
+        "Дааа... Знаю такого, вместе учились, да пошёл он не по тем стопам... По программистким стопам... Больше я его не видел...",
+        "Он ест детей"
+    ]
+    bot.reply_to(message, random.choice(phrases))
+
+@bot.message_handler(commands=['arab', 'Arab'])
+def Arab_command(message):
+    Arab = [
+        "أخي ، اشتر البطيخ الرخيص مني.",
+        "أنا أعرف عربي هناك, انه الحمار كسول.",
+        "أوه ، ما لم يكن لديك من أجل التوصل إلى أن يكون قليلا من التسلل",
+        "نعم ، أنا أتكلم العربية جيدا."
+    ]
+    bot.reply_to(message, random.choice(Arab))
 
 # Основной цикл
 if __name__ == '__main__':

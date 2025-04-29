@@ -11,7 +11,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 API_TOKEN = 'BOT_TOKEN'  # Замените на ваш токен
 bot = telebot.TeleBot(API_TOKEN)
 
-ADMIN_IDS = [6550851233, 2113692455, 5804178669]  # Список ID администраторов
+ADMIN_IDS = ["YOUR ID"]  # Список ID администраторов
 
 
 #Параметры
